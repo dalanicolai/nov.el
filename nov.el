@@ -81,6 +81,17 @@ opening an EPUB file."
   :type 'list
   :group 'nov)
 
+(defcustom nov-rendering-backend
+  (if (string-match-p "XWIDGETS" system-configuration-features)
+      'webkit
+    'shr)
+  "Non-nil if a variable pitch face should be used.
+Otherwise the default face is used."
+  :tag "Rendering backend"
+  :type '(choice (const :tag "Shr" shr)
+                 (const :tag "Webkit" webkit)))
+
+
 (defcustom nov-variable-pitch t
   "Non-nil if a variable pitch face should be used.
 Otherwise the default face is used."
@@ -412,26 +423,38 @@ Each alist item consists of the identifier and full path."
 
 (defvar nov-mode-map
   (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "g") 'nov-render-document)
-    (define-key map (kbd "v") 'nov-view-source)
-    (define-key map (kbd "V") 'nov-view-content-source)
-    (define-key map (kbd "a") 'nov-reopen-as-archive)
-    (define-key map (kbd "m") 'nov-display-metadata)
-    (define-key map (kbd "n") 'nov-next-document)
-    (define-key map (kbd "]") 'nov-next-document)
-    (define-key map (kbd "p") 'nov-previous-document)
-    (define-key map (kbd "[") 'nov-previous-document)
-    (define-key map (kbd "t") 'nov-goto-toc)
-    (define-key map (kbd "l") 'nov-history-back)
-    (define-key map (kbd "r") 'nov-history-forward)
-    (define-key map (kbd "TAB") 'shr-next-link)
-    (define-key map (kbd "M-TAB") 'shr-previous-link)
-    (define-key map (kbd "<backtab>") 'shr-previous-link)
-    (define-key map (kbd "SPC") 'nov-scroll-up)
-    (define-key map (kbd "S-SPC") 'nov-scroll-down)
-    (define-key map (kbd "DEL") 'nov-scroll-down)
-    (define-key map (kbd "<home>") 'beginning-of-buffer)
-    (define-key map (kbd "<end>") 'end-of-buffer)
+    (pcase nov-rendering-backend
+      ('shr (define-key map (kbd "g") 'nov-render-document)
+            (define-key map (kbd "v") 'nov-view-source)
+            (define-key map (kbd "V") 'nov-view-content-source)
+            (define-key map (kbd "a") 'nov-reopen-as-archive)
+            (define-key map (kbd "m") 'nov-display-metadata)
+            (define-key map (kbd "n") 'nov-next-document)
+            (define-key map (kbd "]") 'nov-next-document)
+            (define-key map (kbd "p") 'nov-previous-document)
+            (define-key map (kbd "[") 'nov-previous-document)
+            (define-key map (kbd "t") 'nov-goto-toc)
+            (define-key map (kbd "l") 'nov-history-back)
+            (define-key map (kbd "r") 'nov-history-forward)
+            (define-key map (kbd "TAB") 'shr-next-link)
+            (define-key map (kbd "M-TAB") 'shr-previous-link)
+            (define-key map (kbd "<backtab>") 'shr-previous-link)
+            (define-key map (kbd "SPC") 'nov-scroll-up)
+            (define-key map (kbd "S-SPC") 'nov-scroll-down)
+            (define-key map (kbd "DEL") 'nov-scroll-down)
+            (define-key map (kbd "<home>") 'beginning-of-buffer)
+            (define-key map (kbd "<end>") 'end-of-buffer))
+      ('webkit (define-key map "j" 'xwidget-webkit-scroll-up-line)
+               (define-key map "k" 'xwidget-webkit-scroll-down-line)
+               (define-key map "J" 'xwidget-webkit-scroll-up)
+               (define-key map "K" 'xwidget-webkit-scroll-down)
+               (define-key map "l" 'nov-next-document)
+               (define-key map "h" 'nov-previous-document)
+               (define-key map "gg" 'xwidget-webkit-scroll-top)
+               (define-key map "G" 'xwidget-webkit-scroll-bottom)
+               (define-key map "+" 'xwidget-webkit-zoom-in)
+               (define-key map "-" 'xwidget-webkit-zoom-out)
+               (define-key map "o" 'nov-goto-toc)))
     map))
 
 (defvar nov-button-map
@@ -598,18 +621,32 @@ the HTML is rendered with `nov-render-html-function'."
           buffer-read-only)
       (erase-buffer)
 
-      (cond
-       (imagep
-        (nov-insert-image path ""))
-       ((and (version< nov-epub-version "3.0")
-             (eq id nov-toc-id))
-        (insert (nov-ncx-to-html path)))
-       (t
-        (insert (nov-slurp path))))
+      (pcase nov-rendering-backend
+        ('shr (cond
+               (imagep
+                (nov-insert-image path ""))
+               ((and (version< nov-epub-version "3.0")
+                     (eq id nov-toc-id))
+                (insert (nov-ncx-to-html path)))
+               (t
+                (insert (nov-slurp path))))
 
-      (when (not imagep)
-        (funcall nov-render-html-function))
-      (goto-char (point-min)))))
+              (when (not imagep)
+                (funcall nov-render-html-function))
+              (goto-char (point-min)))
+        ('webkit (insert " ")
+                 (setq xw (xwidget-insert
+                           (point-min) 'webkit (buffer-name)
+                           (xwidget-window-inside-pixel-width (selected-window))
+                           (xwidget-window-inside-pixel-height (selected-window))
+                           nil (xwidget-webkit-current-session)))
+                 (when (and (version< nov-epub-version "3.0")
+                            (eq id nov-toc-id))
+                   (let ((root (esxml-query "navMap" (nov-slurp path t))))
+                     (with-temp-file doc-toc-file
+                       (nov--walk-ncx-node root)))
+                   (setq path doc-toc-file))
+                 (xwidget-webkit-goto-uri xw (concat "file://" path)))))))
 
 (defun nov-find-document (predicate)
   "Return first item in `nov-documents' PREDICATE is true for."
@@ -849,24 +886,31 @@ Saving is only done if `nov-save-place-file' is set."
     (setq nov-epub-version (nov-content-version content))
     (setq nov-metadata (nov-content-metadata content))
     (setq nov-documents (apply 'vector (nov-content-files work-dir content)))
-    (setq nov-documents-index 0))
+    (setq nov-documents-index
+          (pcase nov-rendering-backend
+            ('shr 0)
+            ('webkit (let ((first-section (seq-find (lambda (s)
+                                                      (string-match "htm[l]*$" (cdr s)))
+                                                    nov-documents)))
+                       (seq-position nov-documents first-section))))))
   (setq buffer-undo-list t)
   (setq nov-file-name (buffer-file-name))
-  (setq-local bookmark-make-record-function
-              'nov-bookmark-make-record)
   (set-visited-file-name nil t) ; disable autosaves and save questions
-  (let ((place (nov-saved-place (cdr (assq 'identifier nov-metadata)))))
-    (if place
-        (let ((index (cdr (assq 'index place)))
-              (point (cdr (assq 'point place))))
-          (if (nov--index-valid-p nov-documents index)
-              (progn
-                (setq nov-documents-index index)
-                (nov-render-document)
-                (goto-char point))
-            (warn "Couldn't restore last position")
-            (nov-render-document)))
-      (nov-render-document))))
+  (pcase nov-rendering-backend
+    ('shr (setq-local bookmark-make-record-function
+                      'nov-bookmark-make-record)
+          (let ((place (nov-saved-place (cdr (assq 'identifier nov-metadata)))))
+            (when place
+              (let ((index (cdr (assq 'index place)))
+                    (point (cdr (assq 'point place))))
+                (if (nov--index-valid-p nov-documents index)
+                    (progn
+                      (setq nov-documents-index index)
+                      (nov-render-document)
+                      (goto-char point))
+                  (warn "Couldn't restore last position"))))))
+    ('webkit (require 'xwidget)))
+  (nov-render-document))
 
 
 ;;; recentf interop
